@@ -1,0 +1,33 @@
+FROM ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg jq hostname procps util-linux \
+ && curl -fsSL https://tailscale.com/install.sh | sh \
+ && rm -rf /var/lib/apt/lists/*
+
+# Official tarballs instead of the deb packages: no security auto-configuration,
+# no ES_PATH_CONF/systemd assumptions, and no 8.x vs 9.x apt repo to pick.
+RUN set -eux; \
+    v="__STACK_VERSION__"; \
+    case "$(uname -m)" in \
+      aarch64|arm64) arch=aarch64 ;; \
+      x86_64|amd64)  arch=x86_64 ;; \
+      *) echo "unsupported arch $(uname -m)"; exit 1 ;; \
+    esac; \
+    cd /tmp; \
+    for p in elasticsearch kibana; do \
+      f="${p}-${v}-linux-${arch}.tar.gz"; \
+      curl -fsSLO "https://artifacts.elastic.co/downloads/${p}/${f}"; \
+      curl -fsSLO "https://artifacts.elastic.co/downloads/${p}/${f}.sha512"; \
+      sha512sum -c "${f}.sha512"; \
+      mkdir -p "/opt/${p}"; \
+      tar -xzf "${f}" -C "/opt/${p}" --strip-components=1; \
+      rm -f "${f}" "${f}.sha512"; \
+      useradd --system --no-create-home --home-dir "/opt/${p}" --shell /usr/sbin/nologin "${p}"; \
+      chown -R "${p}:${p}" "/opt/${p}"; \
+    done
+
+COPY ts-up.sh /usr/local/lib/ts-up.sh
+COPY start-es.sh start-kibana.sh /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/start-es.sh /usr/local/bin/start-kibana.sh
