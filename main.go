@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,11 +10,14 @@ import (
 	"crypto/x509/pkix"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -225,6 +230,12 @@ func teardown(o *options) error {
 	if !clusterRE.MatchString(o.cluster) {
 		return fmt.Errorf("--cluster %q must be a DNS label: lowercase letters, digits and hyphens", o.cluster)
 	}
+	
+	apiKey := os.Getenv("TAILSCALE_API_KEY")
+	if apiKey == "" {
+		fmt.Println("Warning: TAILSCALE_API_KEY is not set. Tailscale entries will not be removed via API.")
+	}
+
 	for _, prefix := range []string{o.cluster + "-kibana", o.cluster + "-es"} {
 		for i := 1; ; i++ {
 			name := fmt.Sprintf("%s-%d", prefix, i)
@@ -236,7 +247,81 @@ func teardown(o *options) error {
 			if err := run("container", "delete", name); err != nil {
 				return err
 			}
+
+			// Wipe the local state directory to prevent identity conflicts on the next run
+			statePath := filepath.Join(o.workDir, "tailscale", name)
+			_ = os.RemoveAll(statePath)
+
+			// Remove the device from the Tailscale admin con[118;1:3usole via API
+			if apiKey != "" {
+				fmt.Printf("Purging %s from Tailscale API...\n", name)
+				if err := DeleteTailscaleDevice(context.Background(), apiKey, name); err != nil {
+					fmt.Printf("Warning: Failed to delete %s from Tailscale: %v\n", name, err)
+				}
+			}
 		}
+	}
+	return nil
+}
+
+// DeleteTailscaleDevice removes the tailnet device whose hostname (or machine
+// name, e.g. "elastic-es-1") matches host. It refuses to delete on 0 or >1 matches.
+func DeleteTailscaleDevice(ctx context.Context, apiKey, host string) error {
+	do := func(method, path string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, method, "https://api.tailscale.com/api/v2"+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(body))
+		}
+		return body, nil
+	}
+
+	body, err := do(http.MethodGet, "/tailnet/-/devices")
+	if err != nil {
+		return fmt.Errorf("listing devices: %w", err)
+	}
+
+	var list struct {
+		Devices []struct {
+			ID       string `json:"id"`
+			Hostname string `json:"hostname"`
+			Name     string `json:"name"` // e.g. elastic-es-1.tailXXXX.ts.net
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return fmt.Errorf("decoding device list: %w", err)
+	}
+
+	var ids []string
+	for _, d := range list.Devices {
+		short, _, _ := strings.Cut(d.Name, ".")
+		if d.Hostname == host || short == host {
+			ids = append(ids, d.ID)
+		}
+	}
+
+	switch len(ids) {
+	case 0:
+		return fmt.Errorf("no tailnet device named %q", host)
+	case 1:
+	default:
+		return fmt.Errorf("%d tailnet devices match %q (%v), refusing to delete", len(ids), host, ids)
+	}
+
+	if _, err := do(http.MethodDelete, "/device/"+ids[0]); err != nil {
+		return fmt.Errorf("deleting %s: %w", host, err)
 	}
 	return nil
 }
