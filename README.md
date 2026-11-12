@@ -40,8 +40,9 @@ on x86_64 if you have it.
 A Tailscale tailnet with [MagicDNS and HTTPS certificates](https://tailscale.com/docs/how-to/set-up-https-certificates)
 enabled, and the Mac you are working from joined to it.
 
-A reusable Tailscale auth key (`tskey-auth-...`). Every node uses the same key,
-so it must be reusable. An API access token (`tskey-api-...`) will not work.
+Two Tailscale keys are required in your environment:
+1. **`TAILSCALE_AUTHKEY`**: A reusable Tailscale auth key (`tskey-auth-...`). Every node uses this same key to join the network. It *must* be reusable.
+2. **`TAILSCALE_API_KEY`**: A Tailscale API key (`tskey-api-...`). The `down` command uses this to automatically and cleanly delete the nodes from your Tailscale admin console during teardown.
 
 Go 1.24 or newer to build the CLI.
 
@@ -50,6 +51,7 @@ Go 1.24 or newer to build the CLI.
 ```sh
 go build -o elastic_stack_setup .
 export TAILSCALE_AUTHKEY="tskey-auth-..."
+export TAILSCALE_API_KEY="tskey-api-..."
 
 # single-node cluster with one Kibana
 ./elastic_stack_setup up -v 9.4.3 -t tailb7f31.ts.net
@@ -57,7 +59,7 @@ export TAILSCALE_AUTHKEY="tskey-auth-..."
 # three Elasticsearch nodes, one Kibana, 12 GB per ES node
 ./elastic_stack_setup up -v 9.4.3 -t tailb7f31.ts.net -e 3 --es-memory 12
 
-# tear it all down
+# tear it all down (removes VMs and purges devices from the tailnet)
 ./elastic_stack_setup down
 ```
 
@@ -129,8 +131,8 @@ three minutes and retries, and the quickest fix is a fresh hostname via
 If a machine with the same name already exists in the Tailscale admin console
 and the node has no persisted state for it, Tailscale appends a suffix
 (`elastic-es-1-1`). The start script detects the mismatch and exits with a
-message rather than issuing a certificate for the wrong name. Delete the stale
-machine and run `up` again.
+message rather than issuing a certificate for the wrong name. Using the `down`
+command with your `TAILSCALE_API_KEY` exported prevents this by cleaning up old devices.
 
 Multi-node clusters run Elasticsearch in production mode, which enforces
 bootstrap checks such as `vm.max_map_count >= 262144`. The start script tries
